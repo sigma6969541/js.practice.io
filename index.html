@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Game Hub</title>
+<style>
+body { margin:0; overflow:hidden; background:black; font-family:monospace; }
+canvas { display:block; }
+#ui { position:absolute; top:10px; left:10px; color:white; font-size:20px; }
+#overlay {
+    position:absolute;
+    top:0; left:0; width:100%; height:100%;
+    background:rgba(0,0,0,0.9);
+    color:white; display:flex; justify-content:center; align-items:center;
+    flex-direction:column; font-size:30px;
+}
+button { font-size:24px; padding:10px 20px; margin-top:20px; cursor:pointer; }
+</style>
+</head>
+<body>
+<div id="ui"></div>
+<div id="overlay">
+    <div id="title">Game Hub</div>
+    <button id="doomBtn">Play Doom Clone</button>
+    <button id="tetrisBtn">Play Tetris</button>
+</div>
+<canvas id="game"></canvas>
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+const ui = document.getElementById("ui");
+const overlay = document.getElementById("overlay");
+
+let gameMode = null;
+let running = false;
+
+// -------------------- DOOM CLONE --------------------
+let MAP_SIZE = 24, map=[];
+function generateMap(){
+    map=[];
+    for(let y=0;y<MAP_SIZE;y++){
+        let row=[];
+        for(let x=0;x<MAP_SIZE;x++){
+            row.push((x===0||y===0||x===MAP_SIZE-1||y===MAP_SIZE-1||Math.random()<0.2)?1:0);
+        }
+        map.push(row);
+    }
+}
+
+const brick = document.createElement("canvas");
+brick.width=64; brick.height=64;
+const bctx = brick.getContext("2d");
+bctx.fillStyle="#8B0000"; bctx.fillRect(0,0,64,64);
+bctx.strokeStyle="#550000";
+for(let y=0;y<64;y+=16){for(let x=(y/16%2)*32;x<64;x+=64){bctx.strokeRect(x,y,32,16);}}
+
+let player={x:12,y:12,angle:0,speed:0.05,health:100};
+let keys={};
+document.addEventListener("keydown",e=>keys[e.key.toLowerCase()]=true);
+document.addEventListener("keyup",e=>keys[e.key.toLowerCase()]=false);
+document.addEventListener("mousemove",e=>{if(document.pointerLockElement===canvas)player.angle+=e.movementX*0.003;});
+canvas.addEventListener("click",()=>{if(gameMode==="doom") canvas.requestPointerLock();});
+
+const weapon = document.createElement("canvas"); weapon.width=128; weapon.height=128;
+const wctx = weapon.getContext("2d"); wctx.fillStyle="gray"; wctx.fillRect(0,80,128,48); wctx.fillStyle="yellow"; wctx.fillRect(110,90,18,8);
+let firing=false; canvas.addEventListener("mousedown",()=>{if(gameMode==="doom" && running){bullets.push({x:player.x,y:player.y,angle:player.angle,speed:0.3});firing=true;}});
+canvas.addEventListener("mouseup",()=>firing=false);
+
+let bullets=[],enemies=[],depthBuffer=[],lastSpawn=0,startTime=0,score=0;
+
+function spawnEnemy(){
+    const types=[
+        {name:"red", size:1, speed:0.01, health:50, color:[200,0,0]},
+        {name:"green", size:0.7, speed:0.02, health:30, color:[0,200,0]},
+        {name:"blue", size:1.5, speed:0.007, health:80, color:[0,0,200]}
+    ];
+    let t = types[Math.floor(Math.random()*types.length)];
+    let ex,ey;
+    do{ ex=Math.floor(Math.random()*MAP_SIZE); ey=Math.floor(Math.random()*MAP_SIZE);} while(map[ey][ex]!==0 || Math.hypot(ex-player.x,ey-player.y)<4);
+    return {x:ex+0.5,y:ey+0.5,health:t.health,frame:0,dead:false,deathAnim:0,size:t.size,speed:t.speed,color:t.color};
+}
+
+function castRays(){
+    ctx.fillStyle="#000"; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle="#444"; ctx.fillRect(0,canvas.height/2,canvas.width,canvas.height/2);
+    const fov=Math.PI/3; depthBuffer=[];
+    for(let i=0;i<canvas.width;i++){
+        let rayAngle=player.angle-fov/2+i/canvas.width*fov; let dist=0,hit=false;
+        while(!hit && dist<20){
+            dist+=0.05; let rx=player.x+Math.cos(rayAngle)*dist; let ry=player.y+Math.sin(rayAngle)*dist;
+            if(map[Math.floor(ry)][Math.floor(rx)]===1) hit=true;
+        }
+        let corrected=dist*Math.cos(rayAngle-player.angle); let h=canvas.height/corrected;
+        let texX=Math.floor((player.x+Math.cos(rayAngle)*dist)*64)%64;
+        ctx.drawImage(brick,texX,0,1,64,i,canvas.height/2-h/2,1,h);
+        ctx.fillStyle=`rgba(0,0,0,${corrected*0.03})`; ctx.fillRect(i,canvas.height/2-h/2,1,h);
+        depthBuffer[i]=corrected;
+    }
+}
+
+function movePlayer(){
+    let dx=Math.cos(player.angle)*player.speed, dy=Math.sin(player.angle)*player.speed;
+    if(keys["w"] && map[Math.floor(player.y+dy)][Math.floor(player.x+dx)]===0){player.x+=dx; player.y+=dy;}
+    if(keys["s"] && map[Math.floor(player.y-dy)][Math.floor(player.x-dx)]===0){player.x-=dx; player.y-=dy;}
+    let sx=Math.cos(player.angle+Math.PI/2)*player.speed, sy=Math.sin(player.angle+Math.PI/2)*player.speed;
+    if(keys["a"] && map[Math.floor(player.y)][Math.floor(player.x-sx)]===0){player.x-=sx; player.y-=sy;}
+    if(keys["d"] && map[Math.floor(player.y)][Math.floor(player.x+sx)]===0){player.x+=sx; player.y+=sy;}
+}
+
+function updateEnemies(){
+    for(let e of enemies){
+        if(e.dead){if(e.deathAnim<20)e.deathAnim+=1; continue;}
+        if(e.health<=0){e.dead=true; e.deathAnim=0; continue;}
+        e.frame+=0.1;
+        let dx=player.x-e.x, dy=player.y-e.y, dist=Math.hypot(dx,dy);
+        if(dist>0.5){let nx=e.x+dx/dist*e.speed, ny=e.y+dy/dist*e.speed;
+            if(map[Math.floor(e.y)][Math.floor(nx)]===0)e.x=nx;
+            if(map[Math.floor(ny)][Math.floor(e.x)]===0)e.y=ny;
+        }
+        if(dist<0.8)player.health-=0.2;
+    }
+}
+
+function updateBullets(){
+    for(let b of bullets){b.x+=Math.cos(b.angle)*b.speed; b.y+=Math.sin(b.angle)*b.speed;
+        if(map[Math.floor(b.y)][Math.floor(b.x)]===1)b.dead=true;
+        for(let e of enemies){if(!e.dead && Math.hypot(e.x-b.x,e.y-b.y)<0.5){e.health-=25;b.dead=true;}}
+    }
+    bullets=bullets.filter(b=>!b.dead);
+}
+
+function drawEnemies(){
+    const fov=Math.PI/3;
+    for(let e of enemies){
+        let dx=e.x-player.x, dy=e.y-player.y, dist=Math.hypot(dx,dy), angle=Math.atan2(dy,dx)-player.angle;
+        while(angle<-Math.PI) angle+=Math.PI*2; while(angle>Math.PI) angle-=Math.PI*2;
+        if(Math.abs(angle)>fov/2) continue;
+        let screenX=(angle+fov/2)/fov*canvas.width; let baseSize=64, scaleFactor=5, size=baseSize/dist*scaleFactor, screenY=canvas.height/2-size/2;
+        if(dist<depthBuffer[Math.floor(screenX)]){
+            ctx.save(); ctx.translate(screenX,screenY+size/2); let bob=Math.sin(e.frame*0.5)*5; ctx.translate(0,bob);
+            let alpha=e.dead?1-e.deathAnim/20:1, shrink=e.dead?1-e.deathAnim/25:1;
+            ctx.globalAlpha=alpha;
+            ctx.fillStyle=`rgb(${e.color[0]+Math.sin(e.frame)*50},${e.color[1]},${e.color[2]})`;
+            ctx.beginPath(); ctx.ellipse(0,0,(size/2)*e.size*shrink,(size/2)*e.size*shrink,0,0,Math.PI*2); ctx.fill();
+            ctx.globalAlpha=1; ctx.restore();
+        }
+    }
+}
+
+function drawBullets(){ctx.fillStyle="yellow"; const fov=Math.PI/3;
+    for(let b of bullets){let dx=b.x-player.x, dy=b.y-player.y, dist=Math.hypot(dx,dy), angle=Math.atan2(dy,dx)-player.angle;
+        while(angle<-Math.PI) angle+=Math.PI*2; while(angle>Math.PI) angle-=Math.PI*2;
+        if(Math.abs(angle)>fov/2) continue; let screenX=(angle+fov/2)/fov*canvas.width; ctx.fillRect(screenX-2,canvas.height/2-2,4,4);
+    }
+}
+
+function drawWeapon(){ctx.drawImage(weapon,canvas.width/2-64,canvas.height-128-(firing?5:0));}
+
+function drawEnemyLocator(){
+    const barHeight=20, barWidth=canvas.width*0.8, barX=canvas.width*0.1, barY=10;
+    ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillRect(barX,barY,barWidth,barHeight);
+    for(let e of enemies){if(e.dead)continue;
+        let dx=e.x-player.x, dy=e.y-player.y, angle=Math.atan2(dy,dx)-player.angle;
+        while(angle<-Math.PI) angle+=Math.PI*2; while(angle>Math.PI) angle-=Math.PI*2;
+        if(Math.abs(angle)>Math.PI/2) continue;
+        let dotX=barX+barWidth/2+(angle/(Math.PI/2))*(barWidth/2);
+        ctx.fillStyle=`rgb(${e.color[0]},${e.color[1]},${e.color[2]})`; ctx.beginPath(); ctx.arc(dotX,barY+barHeight/2,6,0,Math.PI*2); ctx.fill();
+    }
+}
+
+function drawMiniMap(){
+    const size=150, scale=size/MAP_SIZE, offsetX=canvas.width-size-10, offsetY=10;
+    ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillRect(offsetX,offsetY,size,size);
+    for(let y=0;y<MAP_SIZE;y++){for(let x=0;x<MAP_SIZE;x++){if(map[y][x]===1){ctx.fillStyle="gray"; ctx.fillRect(offsetX+x*scale,offsetY+y*scale,scale,scale);}}}
+    for(let e of enemies){if(e.dead) continue; ctx.fillStyle=`rgb(${e.color[0]},${e.color[1]},${e.color[2]})`; ctx.fillRect(offsetX+e.x*scale-scale/4,offsetY+e.y*scale-scale/4,scale/2,scale/2);}
+    ctx.fillStyle="white"; ctx.beginPath();
+    ctx.moveTo(offsetX+player.x*scale+Math.cos(player.angle)*scale/2, offsetY+player.y*scale+Math.sin(player.angle)*scale/2);
+    ctx.lineTo(offsetX+player.x*scale-Math.cos(player.angle-Math.PI/2)*scale/3, offsetY+player.y*scale-Math.sin(player.angle-Math.PI/2)*scale/3);
+    ctx.lineTo(offsetX+player.x*scale-Math.cos(player.angle+Math.PI/2)*scale/3, offsetY+player.y*scale-Math.sin(player.angle+Math.PI/2)*scale/3);
+    ctx.closePath(); ctx.fill();
+}
+
+function doomLoop(){
+    if(!running) return;
+    movePlayer(); updateEnemies(); updateBullets();
+    castRays(); drawEnemies(); drawBullets(); drawWeapon(); drawEnemyLocator(); drawMiniMap();
+    if(Date.now()-lastSpawn>2000){enemies.push(spawnEnemy()); lastSpawn=Date.now();}
+    score=Math.floor((Date.now()-startTime)/100);
+    ui.innerHTML=`Health: ${Math.max(0,player.health).toFixed(0)}<br>Enemies: ${enemies.filter(e=>!e.dead).length}<br>Score: ${score}`;
+    if(player.health<=0){running=false; overlay.style.display="flex";
+        overlay.innerHTML=`<div>You Died!</div><div>Time Survived: ${Math.floor((Date.now()-startTime)/1000)}s</div><div>Points: ${score}</div><button id="restartBtn">Restart Doom</button>`;
+        document.getElementById("restartBtn").addEventListener("click",startDoom); return;
+    }
+    requestAnimationFrame(doomLoop);
+}
+
+function startDoom(){
+    overlay.style.display="none"; gameMode="doom"; generateMap();
+    player={x:12,y:12,angle:0,speed:0.05,health:100}; bullets=[]; enemies=[...Array(5)].map(()=>spawnEnemy());
+    startTime=Date.now(); score=0; lastSpawn=Date.now(); running=true; doomLoop();
+}
+
+// -------------------- TETRIS --------------------
+const COLS=10, ROWS=20, BLOCK=30;
+let grid=[], tetromino=null, nextTetromino=null, tetrisScore=0, tetrisRunning=false;
+let lastFall=0, fallInterval=500;
+
+function initGrid(){grid=[]; for(let r=0;r<ROWS;r++){grid[r]=Array(COLS).fill(0);}}
+const shapes=[
+    [[1,1,1,1]], [[1,1],[1,1]], [[0,1,0],[1,1,1]], [[1,0,0],[1,1,1]], [[0,0,1],[1,1,1]], [[1,1,0],[0,1,1]], [[0,1,1],[1,1,0]]
+];
+function randomTetromino(){let s=shapes[Math.floor(Math.random()*shapes.length)]; return {shape:s,x:Math.floor(COLS/2)-1,y:0,color:`hsl(${Math.random()*360},70%,60%)`};}
+
+function drawTetris(){
+    ctx.fillStyle="black"; ctx.fillRect(0,0,canvas.width,canvas.height);
+    for(let r=0;r<ROWS;r++){for(let c=0;c<COLS;c++){if(grid[r][c]){ctx.fillStyle=grid[r][c]; ctx.fillRect(c*BLOCK,r*BLOCK,BLOCK,BLOCK);}}}
+    for(let r=0;r<tetromino.shape.length;r++){for(let c=0;c<tetromino.shape[r].length;c++){if(tetromino.shape[r][c]){ctx.fillStyle=tetromino.color; ctx.fillRect((tetromino.x+c)*BLOCK,(tetromino.y+r)*BLOCK,BLOCK,BLOCK);}}}
+    ui.innerHTML=`Score: ${tetrisScore}`;
+}
+
+function tetrisUpdate(timestamp){
+    if(!tetrisRunning) return;
+    if(!lastFall) lastFall=timestamp;
+    const delta = timestamp - lastFall;
+    if(delta>fallInterval){
+        tetromino.y++;
+        if(collide()){tetromino.y--; lock(); tetromino=randomTetromino();}
+        lastFall=timestamp;
+    }
+    drawTetris();
+    if(grid[0].some(v=>v)) return gameOver();
+    requestAnimationFrame(tetrisUpdate);
+}
+
+function collide(){
+    for(let r=0;r<tetromino.shape.length;r++){for(let c=0;c<tetromino.shape[r].length;c++){
+        if(tetromino.shape[r][c]){
+            let x=tetromino.x+c, y=tetromino.y+r;
+            if(y>=ROWS || x<0 || x>=COLS || grid[y][x]) return true;
+        }
+    }} return false;
+}
+
+function lock(){
+    for(let r=0;r<tetromino.shape.length;r++){for(let c=0;c<tetromino.shape[r].length;c++){
+        if(tetromino.shape[r][c]) grid[tetromino.y+r][tetromino.x+c]=tetromino.color;
+    }}
+    for(let r=ROWS-1;r>=0;r--){if(grid[r].every(v=>v)){grid.splice(r,1); grid.unshift(Array(COLS).fill(0)); tetrisScore+=10; r++;}}
+}
+
+document.addEventListener("keydown",e=>{
+    if(gameMode!=="tetris") return;
+    if(e.key==="ArrowLeft"){tetromino.x--; if(collide()) tetromino.x++;}
+    if(e.key==="ArrowRight"){tetromino.x++; if(collide()) tetromino.x--;}
+    if(e.key==="ArrowDown"){tetromino.y++; if(collide()){tetromino.y--; lock(); tetromino=randomTetromino();}}
+    if(e.key==="ArrowUp"){rotate();}
+});
+
+function rotate(){
+    let s=tetromino.shape, n=[];
+    for(let i=0;i<s[0].length;i++){n[i]=[]; for(let j=0;j<s.length;j++){n[i][j]=s[s.length-1-j][i];}}
+    let old=s; tetromino.shape=n; if(collide()) tetromino.shape=old;
+}
+
+function startTetris(){
+    overlay.style.display="none"; gameMode="tetris"; initGrid(); tetromino=randomTetromino();
+    tetrisScore=0; tetrisRunning=true; lastFall=0; requestAnimationFrame(tetrisUpdate);
+}
+
+function gameOver(){
+    tetrisRunning=false; overlay.style.display="flex";
+    overlay.innerHTML=`<div>Tetris Game Over</div><div>Score: ${tetrisScore}</div><button id="restartTetris">Restart Tetris</button>`;
+    document.getElementById("restartTetris").addEventListener("click",startTetris);
+}
+
+// -------------------- MENU BUTTONS --------------------
+document.getElementById("doomBtn").addEventListener("click",startDoom);
+document.getElementById("tetrisBtn").addEventListener("click",startTetris);
+</script>
+</body>
+</html>
